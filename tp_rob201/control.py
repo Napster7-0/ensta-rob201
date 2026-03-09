@@ -12,9 +12,15 @@ def reactive_obst_avoid(lidar):
     # TODO for TP1
 
     laser_dist = lidar.get_sensor_values()
-    speed = 0.0
+
+
+    speed = 1.0
     rotation_speed = 0.0
 
+    if (laser_dist.shape[0] > 0 and np.min(laser_dist[175:195]) < 100):
+        speed = 0
+        rotation_speed = np.where(laser_dist == np.max(laser_dist[175:195]))[0][0] / 360
+    
     command = {"forward": speed,
                "rotation": rotation_speed}
 
