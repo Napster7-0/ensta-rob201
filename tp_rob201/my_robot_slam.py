@@ -49,8 +49,12 @@ class MyRobotSlam(RobotAbstract):
     def control(self):
         """
         Main control function executed at each time step
+
         """
-        return self.control_tp1()
+        # raw_odom_pose = self.odometer_values()
+        # score = self.tiny_slam.localise(self.lidar(), raw_odom_pose=raw_odom_pose)
+        # print(score)
+        return self.control_tp2()
 
     def control_tp1(self):
         """
@@ -58,9 +62,12 @@ class MyRobotSlam(RobotAbstract):
         Control funtion with minimal random motion
         """
         # self.tiny_slam.compute()
+        pose = self.odometer_values()
 
         # Compute new command speed to perform obstacle avoidance
         command = reactive_obst_avoid(self.lidar())
+        self.tiny_slam.update_map(self.lidar(), pose)
+        self.occupancy_grid.display_cv(pose)
         return command
 
     def control_tp2(self):
@@ -69,9 +76,12 @@ class MyRobotSlam(RobotAbstract):
         Main control function with full SLAM, random exploration and path planning
         """
         pose = self.odometer_values()
-        goal = [0,0,0]
+        
+        goal = np.array([-100, -300, 0.0])
 
         # Compute new command speed to perform obstacle avoidance
         command = potential_field_control(self.lidar(), pose, goal)
+        self.tiny_slam.update_map(self.lidar(), pose)
+        self.occupancy_grid.display_cv(pose)
 
         return command

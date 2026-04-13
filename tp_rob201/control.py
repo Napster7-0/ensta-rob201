@@ -19,10 +19,14 @@ def reactive_obst_avoid(lidar):
 
     if (laser_dist.shape[0] > 0 and np.min(laser_dist[175:195]) < 100):
         speed = 0
-        rotation_speed = np.where(laser_dist == np.max(laser_dist[175:195]))[0][0] / 360
+        rotation_speed = np.where(laser_dist == np.max(laser_dist[180:190]))[0][0] / 360
     
-    command = {"forward": speed,
-               "rotation": rotation_speed}
+    # Clip commands to reasonable ranges and ensure Python int type
+    speed_clipped = int(np.clip(speed, -1, 1).item())
+    rot_clipped = int(np.clip(rotation_speed, -1, 1).item())
+    
+    command = {"forward": speed_clipped,
+               "rotation": rot_clipped}
 
     return command
 
@@ -37,9 +41,56 @@ def potential_field_control(lidar, current_pose, goal_pose):
     robot (x,y) frame (centered on robot, x forward, y on left) or in odom (centered / aligned
     on initial pose, x forward, y on left)
     """
-    # TODO for TP2
+    goal_vec = goal_pose[:2] - current_pose[:2]
+    d_goal = np.linalg.norm(goal_vec)
 
-    command = {"forward": 0,
-               "rotation": 0}
+    if d_goal < 5.0:
+        return {"forward": 0.0, "rotation": 0.0}
+
+    k_att = 1.0
+    att_vec = k_att * goal_vec / max(d_goal, 1e-6)
+
+    ranges = lidar.get_sensor_values()
+    angles = lidar.get_ray_angles()
+
+    d_safe = 120.0
+    k_rep = 0.25
+
+    valid = np.logical_and(np.isfinite(ranges), ranges > 1e-6)
+    close = np.logical_and(valid, ranges < d_safe)
+
+    rep_vec = np.zeros(2)
+    if np.any(close):
+        r = ranges[close]
+        a = angles[close] + current_pose[2]
+
+        # Vector from robot to obstacle in world frame
+        obs_vectors = np.column_stack((r * np.cos(a), r * np.sin(a)))
+        weights = k_rep * (1.0 / r - 1.0 / d_safe) / (r ** 2)
+
+        # Repulsion points away from obstacles
+        rep_vec = -np.sum(obs_vectors * weights[:, None], axis=0)
+
+    field_vec = att_vec + rep_vec
+    if np.linalg.norm(field_vec) < 1e-6:
+        field_vec = att_vec
+
+    desired_heading = np.arctan2(field_vec[1], field_vec[0])
+    angle_diff = desired_heading - current_pose[2]
+    angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
+
+    k_v = 0.03
+    k_w = 1.5
+
+    forward = k_v * d_goal * max(0.0, np.cos(angle_diff))
+    if np.abs(angle_diff) > np.deg2rad(60):
+        forward = 0.0
+
+    rotation = k_w * angle_diff
+
+    command = {
+        "forward": float(np.clip(forward, 0.0, 1.0)),
+        "rotation": float(np.clip(rotation, -1.0, 1.0)),
+    }
 
     return command
