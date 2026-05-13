@@ -89,8 +89,8 @@ class Planner:
             return None
 
         # Carte des murs avec marge de sécurité : on dilate les obstacles
-        OBSTACLE_THRESHOLD = 0.0
-        DILATION_KERNEL = 5  # ~5 cellules = ~10 unités-monde (résolution 2)
+        OBSTACLE_THRESHOLD = 1.0
+        DILATION_KERNEL = 4  # ~5 cellules = ~10 unités-monde (résolution 2)
 
         self.map_walls = copy.deepcopy(self.grid.occupancy_map)
         obstacles_mask = (self.grid.occupancy_map > OBSTACLE_THRESHOLD).astype(np.uint8)

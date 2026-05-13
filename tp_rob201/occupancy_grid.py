@@ -132,7 +132,7 @@ class OccupancyGrid:
 
         self.occupancy_map[x_px, y_px] += val
 
-    def get_predefined_waypoints(self, K=2, M=4, step=500, seed=1):
+    def get_predefined_waypoints(self, K=2, M=5, step=1500, seed=2025):
         """
         Génère M waypoints situés sur un même polynôme d'interpolation.
         Les K ancres du polynôme sont tirées par marche aléatoire bornée
@@ -270,3 +270,48 @@ class OccupancyGrid:
         filename : base name (without extension) of file on disk
         """
         # TODO
+
+    def get_predefined_waypoints_v2(self, M=8, seed=2025):
+        """
+        Génération de waypoints V2 pour l'exploration.
+        Remplace l'interpolation polynomiale (qui oscille fortement) par :
+        1. Un échantillonnage spatial aléatoire pour couvrir toute la carte.
+        2. Un tri glouton (TSP - Plus proche voisin) pour optimiser le parcours
+           et éviter les allers-retours inutiles.
+        """
+        rng = np.random.default_rng(seed)
+
+        # Marges de sécurité pour ne pas placer les cibles dans les murs extérieurs
+        margin_x = 0.15 * (self.x_max_world - self.x_min_world)
+        margin_y = 0.15 * (self.y_max_world - self.y_min_world)
+        x_lo, x_hi = self.x_min_world + margin_x, self.x_max_world - margin_x
+        y_lo, y_hi = self.y_min_world + margin_y, self.y_max_world - margin_y
+
+        # 1. Tirage uniforme de M points dans la zone d'exploration
+        raw_points =[]
+        for _ in range(M):
+            x = rng.uniform(x_lo, x_hi)
+            y = rng.uniform(y_lo, y_hi)
+            raw_points.append(np.array([x, y]))
+
+        # 2. Algorithme du plus proche voisin (Greedy TSP)
+        # On suppose que le robot commence proche de l'origine (0, 0)
+        current_pos = np.array([0.0, 0.0])
+        ordered_waypoints =[]
+        unvisited = raw_points.copy()
+        
+        while len(unvisited) > 0:
+            # Calcul des distances euclidiennes entre la position courante et les points restants
+            dists = [np.linalg.norm(p - current_pos) for p in unvisited]
+            
+            # Sélection du point le plus proche
+            min_idx = np.argmin(dists)
+            next_wp = unvisited.pop(min_idx)
+            
+            # Format attendu : array [x, y, theta]
+            ordered_waypoints.append(np.array([float(next_wp[0]), float(next_wp[1]), 0.0]))
+            
+            # Mise à jour de la position pour le calcul de l'itération suivante
+            current_pos = next_wp
+
+        return ordered_waypoints

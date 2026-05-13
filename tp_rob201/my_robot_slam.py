@@ -10,7 +10,7 @@ from place_bot.simulation.ray_sensors.lidar import LidarParams
 
 from tiny_slam import TinySlam
 
-from control import potential_field_control, reactive_obst_avoid
+from control import potential_field_control, reactive_obst_avoid, dwa_control, potential_field_control_2
 from occupancy_grid import OccupancyGrid
 from planner import Planner
 
@@ -46,13 +46,17 @@ class MyRobotSlam(RobotAbstract):
         # storage for pose after localization
         self.corrected_pose = np.array([0, 0, 0])
 
-        self.goal       = None             # objectif courant (3D)
-        self.path       = None             # trajectoire calculée par A* (2×N)
-        self.path_index = 0                # index du waypoint courant
-        self.waypoints  = self.occupancy_grid.get_predefined_waypoints()
+        self.goal       = None      # objectif courant (3D)
+        self.path       = None    # trajectoire calculée par A* (2×N)
+        self.path_index = 0    # index du waypoint courant
+        self.waypoints  = self.occupancy_grid.get_predefined_waypoints_v2(M=3)
         self.goal_index  = 0
-        self.exploration_steps = 500      # nb d'itérations d'exploration avant planification
-        self.score_threshold   =  0 # seuil minimal pour faire confiance à localise
+        self.exploration_done = False  # vrai dès que tous les waypoints sont atteints
+        self.score_threshold   = 0    # seuil minimal pour faire confiance à localise
+        self.return_goal = np.array([0.0, 0.0, 0.0])  # point de retour (position initiale)
+        self.arrived = False     # flag de fin de mission
+        self.waypoint_tol = 30.0     # distance pour considérer un waypoint atteint
+        self.pf_state = {} # pour la mémoire dans la version 2 du control de potentiel
 
     def control(self):
         """
@@ -87,8 +91,18 @@ class MyRobotSlam(RobotAbstract):
         self.counter = self.counter + 1
         raw_odom = self.odometer_values()
 
-        #  PHASE 1 : exploration (cartographie + localisation) 
-        if self.counter < self.exploration_steps:
+        if self.counter < 40:
+            cor_pose = self.tiny_slam.get_corrected_pose(raw_odom)
+            self.tiny_slam.update_map(self.lidar(), cor_pose)
+            
+            if self.counter % 10 == 0:
+                self.occupancy_grid.display_cv(cor_pose)
+                
+            return {'forward': 0.0, 'rotation': 0.0}
+
+        #  PHASE 1 : exploration (cartographie + localisation)
+        #  Termine dès que TOUS les waypoints prédéfinis ont été visités
+        if not self.exploration_done:
 
             # 1.1. Localisation après quelques itérations (laisser la carte se former)
             if self.counter > 50:
@@ -96,46 +110,73 @@ class MyRobotSlam(RobotAbstract):
             else:
                 score = np.inf   # on accepte toujours pendant le warmup
 
-            # 1.2. Choix de la pose pour la mise à jour de carte
-            if score >= self.score_threshold:
-                cor_pose = self.tiny_slam.get_corrected_pose(raw_odom)
-            else:
-                cor_pose = self.tiny_slam.get_corrected_pose(raw_odom)  # ou pose précédente
-                # variante : ne pas appeler update_map
+            # 1.2. Pose corrigée (servira au goal management et à la mise à jour carte)
+            cor_pose = self.tiny_slam.get_corrected_pose(raw_odom)
 
             # 1.3. Mise à jour de la carte
-            self.tiny_slam.update_map(self.lidar(), cor_pose)
+            if score >= self.score_threshold:
+                self.tiny_slam.update_map(self.lidar(), cor_pose)
 
-            # 1.4. Goal dynamique : tirer un nouveau point une fois l'actuel atteint
-            if self.goal is None or np.linalg.norm(self.goal[0:2] - cor_pose[0:2]) < 30:
+            # 1.4. Gestion des waypoints (parcours unique, pas de cycle infini)
+            if self.goal is None:
                 self.goal = self.waypoints[self.goal_index]
-                self.goal_index = (self.goal_index + 1) % len(self.waypoints)
+                print(f'[Phase 1] Cible waypoint {self.goal_index+1}/{len(self.waypoints)} : {self.goal[:2]}')
+            elif np.linalg.norm(self.goal[0:2] - cor_pose[0:2]) < self.waypoint_tol:
+                # waypoint courant atteint
+                self.goal_index += 1
+                if self.goal_index >= len(self.waypoints):
+                    # tous les waypoints visités → fin de l'exploration
+                    self.exploration_done = True
+                    print(f'[Phase 1] Tous les waypoints atteints (itération {self.counter}) → planification A*')
+                else:
+                    self.goal = self.waypoints[self.goal_index]
+                    print(f'[Phase 1] Cible waypoint {self.goal_index+1}/{len(self.waypoints)} : {self.goal[:2]}')
 
-            # 1.5. Commande basée sur la pose corrigée
-            command = potential_field_control(self.lidar(), cor_pose, self.goal)
+            # 1.5. Si la phase 1 vient juste de se terminer, on ne renvoie pas de commande ici :
+            #      on laisse couler vers la phase 2 dans la même itération.
+            if not self.exploration_done:
+                # command = potential_field_control(self.lidar(), cor_pose, self.goal)
+                # command, self.pf_state = potential_field_control_2(self.lidar(), cor_pose, self.goal, self.pf_state)
+                command = dwa_control(self.lidar(), cor_pose, self.goal)
+                # 1.6. Affichage
+                if self.counter % 10 == 0:
+                    self.occupancy_grid.display_cv(cor_pose, goal=self.goal, traj=self.path)
 
-            # 1.6. Affichage
-            if self.counter % 10 == 0:
-                self.occupancy_grid.display_cv(cor_pose, goal=self.goal, traj=self.path)
+                return command
 
-            return command
-
-        #  PHASE 2 : calcul du chemin retour (une seule fois) 
+        #  PHASE 2 : calcul du chemin retour (une seule fois)
         if self.path is None:
             cor_pose = self.tiny_slam.get_corrected_pose(raw_odom)
             start    = cor_pose
-            goal     = [0.0, 0.0, 0.0]                # point initial
-            self.path = self.planner.plan(start, goal)
+            print(f'[Phase 2] Planification A* de {start[:2]} vers {self.return_goal[:2]}')
+            self.path = self.planner.plan(start, self.return_goal)
             self.path_index = 0
             if self.path is None:
-                print('Pas de chemin trouvé, on continue à explorer')
+                print('Pas de chemin trouvé, on retente à la prochaine itération')
                 return {'forward': 0.0, 'rotation': 0.0}
+            print(f'[Phase 2] Chemin trouvé : {self.path.shape[1]} waypoints')
+            # Affichage immédiat du chemin calculé (avant de commencer à le suivre)
+            self.occupancy_grid.display_cv(cor_pose,
+                                           goal=self.return_goal,
+                                           traj=self.path)
 
-        #  PHASE 3 : suivi du chemin 
+        #  PHASE 3 : suivi du chemin
         cor_pose = self.tiny_slam.get_corrected_pose(raw_odom)
+        # On continue à mettre la carte à jour pendant le retour
         self.tiny_slam.update_map(self.lidar(), cor_pose)
 
-        # 3.1. Avancer le waypoint si on est suffisamment proche
+        # 3.1. Critère d'arrêt global : robot revenu près du point initial
+        dist_to_home = np.linalg.norm(cor_pose[0:2] - self.return_goal[0:2])
+        if dist_to_home < 20.0:
+            if not self.arrived:
+                print(f'[Phase 3] Robot revenu au point initial (d={dist_to_home:.1f})')
+                self.arrived = True
+            self.occupancy_grid.display_cv(cor_pose,
+                                           goal=self.return_goal,
+                                           traj=self.path)
+            return {'forward': 0.0, 'rotation': 0.0}
+
+        # 3.2. Avancer le waypoint si on est suffisamment proche
         while self.path_index < self.path.shape[1]:
             wp = self.path[:, self.path_index]
             if np.linalg.norm(wp - cor_pose[0:2]) < 20:
@@ -143,15 +184,20 @@ class MyRobotSlam(RobotAbstract):
             else:
                 break
 
-        # 3.2. Si arrivé : on s'arrête
+        # 3.3. Si tous les waypoints traités mais robot pas encore arrivé : cibler l'origine
         if self.path_index >= self.path.shape[1]:
-            return {'forward': 0.0, 'rotation': 0.0}
+            wp_world = self.return_goal
+        else:
+            # 3.4. Champ de potentiel vers le waypoint courant
+            wp_world = np.array([self.path[0, self.path_index],
+                                 self.path[1, self.path_index],
+                                 0.0])
 
-        # 3.3. Sinon : champ de potentiel vers le waypoint courant
-        wp_world = [self.path[0, self.path_index], self.path[1, self.path_index], 0.0]
-        command = potential_field_control(self.lidar(), cor_pose, wp_world)
-
-        # 3.4. Affichage
+        # command = potential_field_control(self.lidar(), cor_pose, wp_world)
+        # command, self.pf_state = potential_field_control_2(self.lidar(), cor_pose, wp_world, self.pf_state)
+        command = dwa_control(self.lidar(), cor_pose, wp_world)
+        
+        # 3.5. Affichage
         if self.counter % 10 == 0:
             self.occupancy_grid.display_cv(cor_pose, goal=wp_world, traj=self.path)
         return command
