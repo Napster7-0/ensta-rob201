@@ -132,6 +132,45 @@ class OccupancyGrid:
 
         self.occupancy_map[x_px, y_px] += val
 
+    def get_predefined_waypoints(self, K=2, M=4, step=500, seed=1):
+        """
+        Génère M waypoints situés sur un même polynôme d'interpolation.
+        Les K ancres du polynôme sont tirées par marche aléatoire bornée
+        (chaque ancre est définie relativement à la précédente).
+        K : nombre d'ancres
+        M : nombre de waypoints échantillonnés sur le polynôme
+        step : amplitude max de l'incrément entre deux ancres (unités-monde)
+        seed : pour reproductibilité (None = aléatoire)
+        """
+        rng = np.random.default_rng(seed)
+
+        margin_x = 0.15 * (self.x_max_world - self.x_min_world)
+        margin_y = 0.15 * (self.y_max_world - self.y_min_world)
+        x_lo, x_hi = self.x_min_world + margin_x, self.x_max_world - margin_x
+        y_lo, y_hi = self.y_min_world + margin_y, self.y_max_world - margin_y
+
+        # 1. Tirage relatif des ancres (random walk borné)
+        ax = [0.0]
+        ay = [0.0]
+        for _ in range(1, K):
+            nx = float(np.clip(ax[-1] + rng.uniform(-step, step), x_lo, x_hi))
+            ny = float(np.clip(ay[-1] + rng.uniform(-step, step), y_lo, y_hi))
+            ax.append(nx)
+            ay.append(ny)
+
+        # 2. Un seul polynôme d'interpolation (Lagrange via polyfit, degré K-1)
+        t_anch = np.linspace(0.0, 1.0, K)
+        cx = np.polyfit(t_anch, ax, deg=K - 1)
+        cy = np.polyfit(t_anch, ay, deg=K - 1)
+
+        # 3. Échantillonnage successif des M waypoints sur ce polynôme
+        t_samples = np.linspace(0.0, 1.0, M)
+        xs = np.polyval(cx, t_samples)
+        ys = np.polyval(cy, t_samples)
+
+        return [np.array([float(xs[i]), float(ys[i]), 0.0]) for i in range(M)]
+    
+
     def display_plt(self, robot_pose, goal=None, traj=None):
         """
         Screen display of map and robot pose,

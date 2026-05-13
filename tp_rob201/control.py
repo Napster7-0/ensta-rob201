@@ -22,8 +22,8 @@ def reactive_obst_avoid(lidar):
         rotation_speed = np.where(laser_dist == np.max(laser_dist[180:190]))[0][0] / 360
     
     # Clip commands to reasonable ranges and ensure Python int type
-    speed_clipped = int(np.clip(speed, -1, 1).item())
-    rot_clipped = int(np.clip(rotation_speed, -1, 1).item())
+    speed_clipped = float(np.clip(speed, -1, 1).item())
+    rot_clipped = float(np.clip(rotation_speed, -1, 1).item())
     
     command = {"forward": speed_clipped,
                "rotation": rot_clipped}
@@ -47,14 +47,19 @@ def potential_field_control(lidar, current_pose, goal_pose):
     if d_goal < 5.0:
         return {"forward": 0.0, "rotation": 0.0}
 
-    k_att = 1.0
-    att_vec = k_att * goal_vec / max(d_goal, 1e-6)
+    k_att = 0.05
+    d_treshold = 50
+    d_safe = 300
+    k_rep = 1
+    if d_goal > d_treshold:
+        att_vec = (k_att / max(d_goal, 1e-6)) * goal_vec 
+    else :
+        att_vec = (k_att/d_treshold) * goal_vec
 
     ranges = lidar.get_sensor_values()
     angles = lidar.get_ray_angles()
 
-    d_safe = 120.0
-    k_rep = 0.25
+    
 
     valid = np.logical_and(np.isfinite(ranges), ranges > 1e-6)
     close = np.logical_and(valid, ranges < d_safe)
@@ -79,8 +84,8 @@ def potential_field_control(lidar, current_pose, goal_pose):
     angle_diff = desired_heading - current_pose[2]
     angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
 
-    k_v = 0.03
-    k_w = 1.5
+    k_v = 0.006
+    k_w = 0.3
 
     forward = k_v * d_goal * max(0.0, np.cos(angle_diff))
     if np.abs(angle_diff) > np.deg2rad(60):

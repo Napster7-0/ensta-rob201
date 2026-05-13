@@ -15,7 +15,7 @@ class TinySlam:
         self.odom_pose_ref = np.array([0, 0, 0])
 
 
-    def _score(self, lidar, pose):
+    def score(self, lidar, pose):
         """
         Computes the sum of log probabilities of laser end points in the map
         lidar : placebot object with lidar data
@@ -57,15 +57,18 @@ class TinySlam:
                         use self.odom_pose_ref if not given
         """
         # TODO for TP4
-        corrected_pose = np.zeros(3)
-        odom_pose_ref = self.odom_pose_ref
-        d = np.linalg.norm(odom_pose[0:2])
-        alpha = np.atan2(odom_pose[1], odom_pose[0])
-        corrected_pose[0] = odom_pose_ref[0] + d*np.cos(odom_pose_ref[2] + alpha)
-        corrected_pose[1] = odom_pose_ref[1] + d*np.sin(odom_pose_ref[2] + alpha)
-        corrected_pose[2] = odom_pose_ref[2] + odom_pose[2]
 
-        return corrected_pose
+        if odom_pose_ref is None:
+            odom_pose_ref = self.odom_pose_ref
+
+        d     = np.linalg.norm(odom_pose[0:2])
+        alpha = np.arctan2(odom_pose[1], odom_pose[0])
+
+        cor_x = odom_pose_ref[0] + d * np.cos(odom_pose_ref[2] + alpha)
+        cor_y = odom_pose_ref[1] + d * np.sin(odom_pose_ref[2] + alpha)
+        cor_θ = odom_pose_ref[2] + odom_pose[2]
+        return [cor_x, cor_y, cor_θ]
+
 
     def localise(self, lidar, raw_odom_pose):
         """
@@ -74,21 +77,39 @@ class TinySlam:
         odom : [x, y, theta] nparray, raw odometry position
         """
         # TODO for TP4
-        N = 0
-        sigma = 0.5
-        best_score = self._score(lidar,self.get_corrected_pose(raw_odom_pose))
-        while N < 10 :
-            offset = np.random.normal(loc=0.0, scale=np.sqrt(sigma), size=2)  # bruit sur x,y
-            ref = self.odom_pose_ref[:2] + offset
-            score = self._score(lidar, self.get_corrected_pose(raw_odom_pose, ref))
-            if score > best_score:
-                N = 0
-                best_score = score
-                self.odom_pose_ref=ref
-                continue
-            N+=1
 
+        # 1. Score de la pose courante (référence actuelle)
+        cor_pose0   = self.get_corrected_pose(raw_odom_pose)   # utilise self.odom_pose_ref
+        best_score  = self.score(lidar, cor_pose0)
+        best_ref    = np.copy(self.odom_pose_ref)                  # copie 3D 
+
+        # 2. Hyper-paramètres
+        sigma_xy    = 5.0   # unités-monde 
+        sigma_theta = 0.05  # radians (~3°)
+        N_max       = 1000    # tirages sans amélioration avant arrêt
+        N           = 0
+
+        while N < N_max:
+        # 3. Tirer un offset 3D (x, y, θ)
+            offset = np.random.normal(scale=[sigma_xy, sigma_xy, sigma_theta], size=3)
+            candidate = best_ref + offset                     # taille 3 !
+
+        # 4. Calculer le score avec la pose candidate
+            cor_pose = self.get_corrected_pose(raw_odom_pose, candidate)
+            s = self.score(lidar, cor_pose)
+
+        # 5. Mettre à jour si amélioration
+            if s > best_score:
+                best_score = s
+                best_ref = candidate
+                N = 0
+            else:
+                N = N + 1
+        # 6. Mémoriser la meilleure référence trouvée
+
+        self.odom_pose_ref = best_ref
         return best_score
+
 
     def update_map(self, lidar, pose):
         """
@@ -96,32 +117,40 @@ class TinySlam:
         lidar : placebot object with lidar data
         pose : [x, y, theta] nparray, corrected pose in world coordinates
         """
-        lidar_values = lidar.get_sensor_values()
-        lidar_angles = lidar.get_ray_angles()
+        ranges  = lidar.get_sensor_values()
+        angles  = lidar.get_ray_angles()
 
-        # Coordonnées des obstacles dans le repère absolu
-        x_obs = pose[0] + lidar_values * np.cos(lidar_angles + pose[2])
-        y_obs = pose[1] + lidar_values * np.sin(lidar_angles + pose[2])
+        # 1. Filtrer les rayons à la portée maximale (pas d'obstacle réel)
+        max_range = 600  # ou 600 par défaut
+        valid     = ranges < max_range - 1e-3
+        r_used    = ranges[valid]
+        a_used    = angles[valid]
 
-        # max_range = lidar_values.max()
-        # mask = lidar_values < max_range  # garde seulement les vrais obstacles
+        # 2. Coordonnées des impacts dans le repère absolu
+        x_obs = pose[0] + r_used * np.cos(a_used + pose[2])
+        y_obs = pose[1] + r_used * np.sin(a_used + pose[2])
 
-        # x_obs = x_obs[mask]
-        # y_obs = y_obs[mask]
+        # 3. Zone à proba 0.5 : on ne touche pas la cellule juste avant l'impact
+        eps        = 5.0  # unités-monde (constante claire, ~2-3 cellules)
+        r_free_end = np.maximum(r_used - eps, 0)
+        x_free_end = pose[0] + r_free_end * np.cos(a_used + pose[2])
+        y_free_end = pose[1] + r_free_end * np.sin(a_used + pose[2])
 
-        eps = 0.01*x_obs.max()
-        val_faible = -0.5
-        val_forte = 2
-        for i in range(x_obs.shape[0]):
-            self.grid.add_value_along_line(pose[0], pose[1], x_obs[i], y_obs[i], val_faible)
-        self.grid.add_map_points(x_obs, y_obs, val_forte)
-        self.grid.add_map_points(x_obs-eps, y_obs-eps, val_forte)
-        self.grid.add_map_points(x_obs+eps, y_obs+eps, val_forte)
+        # 4. Espace libre : Bresenham de la pose au point « free_end »
+        val_libre   = -1.0   # log-odd faible (négatif)
+        val_obstacle = +2.0  # log-odd fort (positif)
 
+        for i in range(len(x_free_end)):
+            self.grid.add_value_along_line(pose[0], pose[1],
+                                            x_free_end[i], y_free_end[i],
+                                            val_libre)
+
+        # 5. Obstacle : on tape juste sur les cellules d'impact (pas de décalage diagonal)
+        self.grid.add_map_points(x_obs, y_obs, val_obstacle)
+
+        # 6. Seuillage pour éviter les divergences (consigne explicite)
         self.grid.occupancy_map = np.clip(self.grid.occupancy_map, -40, 40)
 
-
-        
 
     def compute(self):
         """ Useless function, just for the exercise on using the profiler """
